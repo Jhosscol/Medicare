@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "196233736536",
+    "project_id": "medi-care-f1469",
+    "storage_bucket": "medi-care-f1469.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:196233736536:android:c7cd0da271c649e463f52d",
+        "android_client_info": {
+          "package_name": "com.example.medicare"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "196233736536-1q3nbn5dv63qr9sinj5ul1qmvm16r20m.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAnreUQAXMucmjRK-76Np5CpnhTBhGBMhE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "196233736536-1q3nbn5dv63qr9sinj5ul1qmvm16r20m.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
