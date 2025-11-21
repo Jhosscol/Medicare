@@ -209,7 +209,7 @@ Para configurar:
         btnProbar = Button(this).apply {
             text = "🧪 PROBAR"
             textSize = 16f
-            setBackgroundColor(Color.parseColor("#FF9800"))
+            setBackgroundColor(Color.parseColor("#bf7ed6"))
             setTextColor(Color.WHITE)
             setPadding(30, 20, 30, 20)
             setOnClickListener { probarConfiguracion() }
@@ -218,7 +218,7 @@ Para configurar:
         btnGuardar = Button(this).apply {
             text = "💾 GUARDAR"
             textSize = 16f
-            setBackgroundColor(Color.parseColor("#4CAF50"))
+            setBackgroundColor(Color.parseColor("#3fc498"))
             setTextColor(Color.WHITE)
             setPadding(30, 20, 30, 20)
             setOnClickListener { guardarConfiguracion() }
