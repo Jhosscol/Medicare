@@ -44,6 +44,8 @@ import android.content.BroadcastReceiver
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.content.IntentFilter
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.delay
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -109,6 +111,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var glowAnimator: ObjectAnimator? = null
 
     private lateinit var inventoryUpdateReceiver: BroadcastReceiver
+    private lateinit var firebaseAuthManager: FirebaseAuthManager
+    private lateinit var firestoreManager: FirestoreManager
+
+
 
     // Patrones de reconocimiento
     private val patronesNuevoTratamiento = listOf(
@@ -139,9 +145,55 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         const val ACTION_INVENTORY_UPDATED = "com.example.medicare.INVENTORY_UPDATED"
     }
 
+    @OptIn(UnstableApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        firebaseAuthManager = FirebaseAuthManager(this)
+        firestoreManager = FirestoreManager()
+        // ✅ OBTENER Y VERIFICAR userId
+        val userId = firebaseAuthManager.getCurrentUserId()
+        Log.d("MainActivity", "=== INICIANDO APP ===")
+        Log.d("MainActivity", "Usuario logueado: $userId")
+        if (!firebaseAuthManager.isUserLoggedIn()) {
+            Log.d("MainActivity", "❌ No hay usuario, ir a login")
+            val intent = Intent(this, LoginActivity::class.java)
+            startActivity(intent)
+            finish()
+            return
+        }
+
+        Log.d("MainActivity", "✅ Usuario verificado: $userId")
+        lifecycleScope.launch {
+            val resultado = firebaseAuthManager.getUserData()
+            resultado.fold(
+                onSuccess = { usuario ->
+                    usuario?.let {
+                        Log.d("MainActivity", "👤 Usuario: ${it.nombre} (${it.email})")
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            speakText("Bienvenido ${it.nombre}. Sistema Medi Care listo.")
+                        }, 2000)
+                    }
+                },
+                onFailure = { error ->
+                    Log.e("MainActivity", "❌ Error obteniendo usuario: ${error.message}")
+                }
+            )
+
+            // 🔄 SINCRONIZAR CON FIREBASE
+            Log.d("MainActivity", "🔄 Iniciando sincronización...")
+            sincronizarConFirebase()
+            Log.d("MainActivity", "✅ Sincronización completada")
+        }
+
         setContentView(R.layout.activity_main)
+
+        // ✅ INICIALIZAR BASE DE DATOS
+        initDatabase()
+
+        // ✅ VERIFICAR QUE userId ESTÉ DISPONIBLE
+        Log.d("MainActivity", "✅ DBHelper inicializado con usuario: $userId")
+
         tts = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 tts.language = Locale("es", "ES") // o Locale.getDefault() si prefieres
@@ -176,6 +228,185 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         setupMedicineOverlayListeners()
 
         setupInventoryUpdateReceiver()
+    }
+
+    @OptIn(UnstableApi::class)
+    private suspend fun sincronizarConFirebase() {
+        val userId = firebaseAuthManager.getCurrentUserId()
+
+        if (userId == null) {
+            Log.e("MainActivity", "❌ No hay usuario logueado para sincronizar")
+            return
+        }
+
+        Log.d("MainActivity", "")
+        Log.d("MainActivity", "════════════════════════════════════════")
+        Log.d("MainActivity", "🔄 INICIANDO SINCRONIZACIÓN CON FIREBASE")
+        Log.d("MainActivity", "UserId: $userId")
+        Log.d("MainActivity", "════════════════════════════════════════")
+
+        try {
+            // 1️⃣ OBTENER MEDICAMENTOS DE FIREBASE
+            Log.d("MainActivity", "☁️ Consultando Firebase...")
+            val resultadoFirebase = firestoreManager.obtenerMedicamentos(userId)
+
+            resultadoFirebase.fold(
+                onSuccess = { medicamentosFirebase ->
+                    Log.d("MainActivity", "✅ Respuesta de Firebase recibida")
+                    Log.d("MainActivity", "📦 Medicamentos en Firebase: ${medicamentosFirebase.size}")
+
+                    if (medicamentosFirebase.isNotEmpty()) {
+                        Log.d("MainActivity", "Lista de medicamentos en Firebase:")
+                        medicamentosFirebase.forEachIndexed { index, med ->
+                            Log.d("MainActivity", "  ${index + 1}. ${med.nombre} - ${med.cantidad} unidades")
+                        }
+                    } else {
+                        Log.d("MainActivity", "⚠️ Firebase está VACÍO")
+                    }
+
+                    // 2️⃣ OBTENER MEDICAMENTOS LOCALES
+                    val medicamentosLocales = dbHelper.obtenerTodosMedicamentos()
+                    Log.d("MainActivity", "💾 Medicamentos locales: ${medicamentosLocales.size}")
+
+                    if (medicamentosLocales.isNotEmpty()) {
+                        Log.d("MainActivity", "Lista de medicamentos locales:")
+                        medicamentosLocales.forEachIndexed { index, med ->
+                            Log.d("MainActivity", "  ${index + 1}. ${med.nombre} - ${med.cantidad} unidades (ID: ${med.id})")
+                        }
+                    } else {
+                        Log.d("MainActivity", "⚠️ Base de datos local está VACÍA")
+                    }
+
+                    // 3️⃣ DECIDIR ESTRATEGIA
+                    when {
+                        // CASO 1: Firebase tiene datos, local está vacío → DESCARGAR
+                        medicamentosFirebase.isNotEmpty() && medicamentosLocales.isEmpty() -> {
+                            Log.d("MainActivity", "")
+                            Log.d("MainActivity", "⬇️⬇️⬇️ DESCARGANDO DE FIREBASE ⬇️⬇️⬇️")
+                            Log.d("MainActivity", "")
+
+                            medicamentosFirebase.forEach { medFirebase ->
+                                Log.d("MainActivity", "Descargando: ${medFirebase.nombre}")
+
+                                val medLocal = medFirebase.toMedicamento()
+                                val idInsertado = dbHelper.insertarMedicamento(medLocal)
+
+                                if (idInsertado > 0) {
+                                    Log.d("MainActivity", "  ✅ ${medLocal.nombre} insertado (ID local: $idInsertado)")
+
+                                    // Programar recordatorios
+                                    medLocal.id = idInsertado
+                                    medLocal.horaInicio?.let { hora ->
+                                        medicamentoAlarmManager.programarRecordatoriosMedicamento(medLocal)
+                                        Log.d("MainActivity", "  ⏰ Recordatorios programados")
+                                    }
+                                } else {
+                                    Log.e("MainActivity", "  ❌ Error insertando ${medLocal.nombre}")
+                                }
+                            }
+
+                            Log.d("MainActivity", "✅ Descarga completada")
+                        }
+
+                        // CASO 2: Local tiene datos, Firebase está vacío → SUBIR
+                        medicamentosLocales.isNotEmpty() && medicamentosFirebase.isEmpty() -> {
+                            Log.d("MainActivity", "")
+                            Log.d("MainActivity", "⬆️⬆️⬆️ SUBIENDO A FIREBASE ⬆️⬆️⬆️")
+                            Log.d("MainActivity", "")
+
+                            val resultado = firestoreManager.sincronizarTodos(userId, medicamentosLocales)
+                            resultado.fold(
+                                onSuccess = { count ->
+                                    Log.d("MainActivity", "✅ $count medicamentos subidos a Firebase")
+                                },
+                                onFailure = { error ->
+                                    Log.e("MainActivity", "❌ Error subiendo: ${error.message}")
+                                }
+                            )
+                        }
+
+                        // CASO 3: Ambos tienen datos → MERGE
+                        medicamentosFirebase.isNotEmpty() && medicamentosLocales.isNotEmpty() -> {
+                            Log.d("MainActivity", "")
+                            Log.d("MainActivity", "🔀🔀🔀 HACIENDO MERGE 🔀🔀🔀")
+                            Log.d("MainActivity", "")
+
+                            val mapLocal = medicamentosLocales.associateBy {
+                                normalizarNombreMedicamento(it.nombre)
+                            }
+
+                            medicamentosFirebase.forEach { medFirebase ->
+                                val nombreKey = normalizarNombreMedicamento(medFirebase.nombre)
+                                val existenteLocal = mapLocal[nombreKey]
+
+                                if (existenteLocal == null) {
+                                    val medLocal = medFirebase.toMedicamento()
+                                    val idInsertado = dbHelper.insertarMedicamento(medLocal)
+
+                                    if (idInsertado > 0) {
+                                        medLocal.id = idInsertado
+                                        medLocal.horaInicio?.let {
+                                            medicamentoAlarmManager.programarRecordatoriosMedicamento(medLocal)
+                                        }
+                                        Log.d("MainActivity", "  ➕ ${medFirebase.nombre} agregado desde Firebase")
+                                    }
+                                } else {
+                                    dbHelper.actualizarCantidadMedicamento(
+                                        existenteLocal.id,
+                                        medFirebase.cantidad
+                                    )
+                                    Log.d("MainActivity", "  🔄 ${medFirebase.nombre} actualizado")
+                                }
+                            }
+
+                            Log.d("MainActivity", "✅ Merge completado")
+                        }
+
+                        else -> {
+                            Log.d("MainActivity", "")
+                            Log.d("MainActivity", "✨ Sin medicamentos para sincronizar")
+                            Log.d("MainActivity", "")
+                        }
+                    }
+
+                    // 4️⃣ RECARGAR INTERFAZ
+                    runOnUiThread {
+                        loadMedicamentos()
+                        Log.d("MainActivity", "🖼️ Interfaz actualizada: ${medicamentosList.size} medicamentos")
+                    }
+                },
+                onFailure = { error ->
+                    Log.e("MainActivity", "❌ ERROR obteniendo de Firebase")
+                    Log.e("MainActivity", "Error: ${error.message}")
+                    Log.e("MainActivity", "Stack trace:", error)
+
+                    runOnUiThread {
+                        loadMedicamentos()
+                        if (medicamentosList.isNotEmpty()) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "⚠️ Sin conexión - Mostrando datos locales",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+            )
+
+        } catch (e: Exception) {
+            Log.e("MainActivity", "❌ EXCEPCIÓN en sincronización")
+            Log.e("MainActivity", "Error: ${e.message}", e)
+
+            runOnUiThread {
+                loadMedicamentos()
+            }
+        }
+
+        Log.d("MainActivity", "")
+        Log.d("MainActivity", "════════════════════════════════════════")
+        Log.d("MainActivity", "🏁 FIN SINCRONIZACIÓN")
+        Log.d("MainActivity", "════════════════════════════════════════")
+        Log.d("MainActivity", "")
     }
 
     private fun initManagers() {
@@ -295,6 +526,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    @OptIn(UnstableApi::class)
     private fun stopManualListening() {
         if (isListening && speechRecognizer != null) {
             Log.d("MainActivity", "🛑 Deteniendo escucha manual")
@@ -324,6 +556,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    @OptIn(UnstableApi::class)
     private fun startManualListening() {
         if (!isListening && speechRecognizer != null) {
             Log.d("MainActivity", "🎤 Iniciando escucha manual")
@@ -527,6 +760,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    @OptIn(UnstableApi::class)
     private fun speakText(text: String) {
         // ✅ CAMBIO: No hablar si está escuchando manualmente
         if (isListening) {
@@ -837,6 +1071,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 return
             }
 
+            //Login
+            textoLower.contains("cerrar sesión") ||
+                    textoLower.contains("salir cuenta") ||
+                    textoLower.contains("logout") -> {
+                Log.d("VoiceCommand", "Cerrando sesión")
+                cerrarSesion()
+            }
+
+            textoLower.contains("mi perfil") ||
+                    textoLower.contains("mis datos") ||
+                    textoLower.contains("información personal") -> {
+                Log.d("VoiceCommand", "Mostrando perfil")
+                mostrarPerfil()
+            }
+
             // NUEVO TRATAMIENTO
             !isCollectingMedication && patronesNuevoTratamiento.any { textoLower.contains(it) } -> {
                 Log.d("VoiceCommand", "Iniciando nuevo tratamiento")
@@ -918,6 +1167,141 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // Activar modo reabastecimiento
         esperandoConfirmacion = true
         medicationStep = 10 // Step especial para reabastecimiento
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun cerrarSesion() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Cerrar Sesión")
+            .setMessage("¿Desea cerrar su sesión?\n\nSus medicamentos serán respaldados en la nube.")
+            .setPositiveButton("Sí, cerrar") { dialog, _ ->
+                val userId = firebaseAuthManager.getCurrentUserId()
+
+                if (userId != null) {
+                    dialog.dismiss()
+                    val progressDialog = android.app.ProgressDialog(this).apply {
+                        setMessage("Sincronizando con la nube...")
+                        setCancelable(false)
+                        show()
+                    }
+
+                    lifecycleScope.launch {
+                        try {
+                            Log.d("MainActivity", "🔄 Sincronizando datos antes de cerrar sesión...")
+
+                            val medicamentosLocales = dbHelper.obtenerTodosMedicamentos()
+                            Log.d("MainActivity", "📦 ${medicamentosLocales.size} medicamentos a sincronizar")
+
+                            if (medicamentosLocales.isNotEmpty()) {
+                                // ✅ SINCRONIZAR CON FIREBASE
+                                val resultado = firestoreManager.sincronizarTodos(userId, medicamentosLocales)
+                                resultado.fold(
+                                    onSuccess = { count ->
+                                        Log.d("MainActivity", "✅ $count medicamentos sincronizados con Firebase")
+                                    },
+                                    onFailure = { error ->
+                                        Log.e("MainActivity", "❌ Error sincronizando: ${error.message}")
+
+                                        // ⚠️ MOSTRAR ERROR Y PREGUNTAR SI CONTINUAR
+                                        runOnUiThread {
+                                            progressDialog.dismiss()
+
+                                            androidx.appcompat.app.AlertDialog.Builder(this@MainActivity)
+                                                .setTitle("Error de Sincronización")
+                                                .setMessage("No se pudieron sincronizar los datos. ¿Desea cerrar sesión de todos modos?\n\nSus medicamentos solo estarán disponibles localmente.")
+                                                .setPositiveButton("Cerrar de todos modos") { _, _ ->
+                                                    continuarCierreSesion(userId)
+                                                }
+                                                .setNegativeButton("Cancelar", null)
+                                                .show()
+                                        }
+                                        return@launch // Detener el proceso
+                                    }
+                                )
+                            }
+
+                            // ✅ ESPERAR A QUE FIREBASE PROCESE
+                            delay(1000)
+
+                            // ✅ CONTINUAR CON CIERRE
+                            continuarCierreSesion(userId)
+
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                speakText("Sesión cerrada. Sus datos están seguros en la nube.")
+
+                                val intent = Intent(this@MainActivity, LoginActivity::class.java)
+                                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                startActivity(intent)
+                                finish()
+                            }
+
+                        } catch (e: Exception) {
+                            Log.e("MainActivity", "❌ Error en proceso de cierre: ${e.message}")
+                            runOnUiThread {
+                                progressDialog.dismiss()
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Error al cerrar sesión: ${e.message}",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
+                } else {
+                    // No hay userId, cerrar directamente
+                    firebaseAuthManager.logout()
+                    speakText("Sesión cerrada.")
+
+                    val intent = Intent(this, LoginActivity::class.java)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                    startActivity(intent)
+                    finish()
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun continuarCierreSesion(userId: String) {
+        // Limpiar datos locales
+        Log.d("MainActivity", "🗑️ Limpiando datos locales de usuario: $userId")
+        dbHelper.limpiarDatosUsuario(userId)
+
+        // Cerrar sesión en Firebase
+        firebaseAuthManager.logout()
+    }
+
+    private fun mostrarPerfil() {
+        lifecycleScope.launch {
+            val resultado = firebaseAuthManager.getUserData()
+
+            resultado.fold(
+                onSuccess = { usuario ->
+                    if (usuario != null) {
+                        val mensaje = buildString {
+                            append("Su perfil: ")
+                            append("Nombre: ${usuario.nombre}. ")
+                            append("Email: ${usuario.email}. ")
+                            if (usuario.telefono.isNotEmpty()) {
+                                append("Teléfono: ${usuario.telefono}. ")
+                            }
+                            if (usuario.tieneContactoEmergencia()) {
+                                append("Contacto de emergencia: ${usuario.telefonoEmergencia}. ")
+                            }
+                        }
+
+                        speakText(mensaje)
+                    } else {
+                        speakText("No se pudo obtener su información de perfil.")
+                    }
+                },
+                onFailure = { error ->
+                    speakText("Error al obtener perfil: ${error.message}")
+                }
+            )
+        }
     }
 
     @OptIn(UnstableApi::class)
@@ -1174,12 +1558,68 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     @OptIn(UnstableApi::class)
     private fun registrarNuevoMedicamento() {
+        Log.d("MainActivity", "=== INICIANDO REGISTRO MEDICAMENTO ===")
+        Log.d("MainActivity", "Nombre: ${currentMedication.nombre}")
+        Log.d("MainActivity", "Cantidad: ${currentMedication.cantidad}")
+        Log.d("MainActivity", "Horario: ${currentMedication.horarioHoras}h")
+        Log.d("MainActivity", "Hora inicio: ${currentMedication.horaInicio}")
+
         val idInsertado = dbHelper.insertarMedicamento(currentMedication)
 
         if (idInsertado > 0) {
-            Log.d("MainActivity", "✅ Medicamento nuevo registrado")
-            Log.d("MainActivity", "ID: $idInsertado, Nombre: ${currentMedication.nombre}")
-            Log.d("MainActivity", "Cantidad: ${currentMedication.cantidad}, Horario: ${currentMedication.horarioHoras}h")
+            Log.d("MainActivity", "✅ Medicamento guardado LOCALMENTE (ID: $idInsertado)")
+            currentMedication.id = idInsertado
+
+            // ✅ SINCRONIZAR CON FIREBASE INMEDIATAMENTE
+            val userId = firebaseAuthManager.getCurrentUserId()
+            Log.d("MainActivity", "🔄 Iniciando sincronización con Firebase...")
+            Log.d("MainActivity", "UserId: $userId")
+
+            if (userId != null) {
+                lifecycleScope.launch {
+                    try {
+                        Log.d("MainActivity", "📤 Enviando medicamento a Firebase...")
+                        Log.d("MainActivity", "Datos a enviar: ${currentMedication.nombre}, ${currentMedication.cantidad} unidades")
+
+                        val resultado = firestoreManager.sincronizarMedicamento(userId, currentMedication)
+
+                        resultado.fold(
+                            onSuccess = { firebaseId ->
+                                Log.d("MainActivity", "✅✅✅ MEDICAMENTO SINCRONIZADO CON FIREBASE ✅✅✅")
+                                Log.d("MainActivity", "Firebase ID: $firebaseId")
+                                Log.d("MainActivity", "UserId: $userId")
+                                Log.d("MainActivity", "Medicamento: ${currentMedication.nombre}")
+
+                                runOnUiThread {
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "✅ Medicamento guardado en la nube",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            onFailure = { error ->
+                                Log.e("MainActivity", "❌❌❌ ERROR SINCRONIZANDO CON FIREBASE ❌❌❌")
+                                Log.e("MainActivity", "Error: ${error.message}")
+                                Log.e("MainActivity", "UserId: $userId")
+                                Log.e("MainActivity", "Medicamento: ${currentMedication.nombre}")
+
+                                runOnUiThread {
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "⚠️ Error guardando en nube: ${error.message}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }
+                        )
+                    } catch (e: Exception) {
+                        Log.e("MainActivity", "❌ EXCEPCIÓN en sincronización: ${e.message}", e)
+                    }
+                }
+            } else {
+                Log.e("MainActivity", "❌ No hay userId, no se puede sincronizar con Firebase")
+            }
 
             // Programar recordatorios
             programarRecordatorios(
@@ -1198,7 +1638,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         "Inicio del tratamiento: $horaInicioStr."
             )
         } else {
-            Log.e("MainActivity", "❌ Error al insertar medicamento en BD")
+            Log.e("MainActivity", "❌ Error al insertar medicamento en BD local")
             speakText("Error al registrar el medicamento. Por favor, intente nuevamente.")
         }
 
@@ -1209,7 +1649,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tvEstado.text = "Vigilancia de emergencia activa"
 
         loadMedicamentos()
+        Log.d("MainActivity", "=== FIN REGISTRO MEDICAMENTO ===")
     }
+
 
     // Función auxiliar para extraer la hora de inicio del texto
     @OptIn(UnstableApi::class)
@@ -1373,62 +1815,57 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     @OptIn(UnstableApi::class)
     private fun programarRecordatorios(nombre: String, inicio: Long, intervaloHoras: Int) {
         Log.d("MainActivity", "=== INICIANDO programarRecordatorios ===")
-        Log.d(
-            "MainActivity",
-            "Nombre: $nombre, Inicio: $inicio, Intervalo: $intervaloHoras horas"
-        )
+        Log.d("MainActivity", "Nombre recibido: '$nombre'")
+        Log.d("MainActivity", "Inicio: $inicio, Intervalo: $intervaloHoras horas")
 
-        // Usar el MedicamentoAlarmManager existente en lugar de lógica manual
-        val medicamentoAlarmManager = MedicamentoAlarmManager(this)
+        // ✅ NORMALIZAR EL NOMBRE ANTES DE BUSCAR
+        val nombreNormalizado = normalizarNombreMedicamento(nombre)
+        Log.d("MainActivity", "Nombre normalizado: '$nombreNormalizado'")
 
-        // Buscar el medicamento recién creado por nombre
+        // Buscar el medicamento recién creado por nombre NORMALIZADO
         val medicamentos = dbHelper.obtenerTodosMedicamentos()
         Log.d("MainActivity", "Total medicamentos en DB: ${medicamentos.size}")
 
-        val medicamento = medicamentos.find { it.nombre == nombre }
+        // ✅ BUSCAR CON NORMALIZACIÓN
+        val medicamento = medicamentos.find {
+            normalizarNombreMedicamento(it.nombre) == nombreNormalizado
+        }
 
         if (medicamento != null) {
-            Log.d("MainActivity", "Medicamento encontrado: ${medicamento.nombre}")
+            Log.d("MainActivity", "✅ Medicamento encontrado: ${medicamento.nombre}")
             Log.d("MainActivity", "ID: ${medicamento.id}, Activo: ${medicamento.activo}")
-            Log.d("MainActivity", "Hora inicio original: ${medicamento.horaInicio}")
-            Log.d("MainActivity", "Intervalo original: ${medicamento.horarioHoras}")
+            Log.d("MainActivity", "Hora inicio: ${medicamento.horaInicio}")
+            Log.d("MainActivity", "Intervalo: ${medicamento.horarioHoras}")
 
             // Asegurarse de que el medicamento esté activo
             if (!medicamento.activo) {
                 Log.d("MainActivity", "Activando medicamento...")
                 dbHelper.actualizarEstadoMedicamento(medicamento.id, true)
-                // Actualizar el objeto medicamento
                 medicamento.activo = true
             }
 
-            // Usar el sistema existente que ya maneja todo correctamente
+            // Usar el sistema existente
             Log.d("MainActivity", "Llamando a programarRecordatoriosMedicamento...")
             medicamentoAlarmManager.programarRecordatoriosMedicamento(medicamento)
 
-            Log.d(
-                "MainActivity",
-                "Recordatorios programados para ${medicamento.nombre} usando MedicamentoAlarmManager"
-            )
+            Log.d("MainActivity", "✅ Recordatorios programados para ${medicamento.nombre}")
 
-            // Forzar actualización de la interfaz
-            Log.d("MainActivity", "Actualizando interfaz...")
+            // Actualizar interfaz
             runOnUiThread {
                 actualizarListaMedicamentos()
             }
 
         } else {
-            Log.e(
-                "MainActivity",
-                "No se encontró el medicamento $nombre para programar recordatorios"
-            )
+            Log.e("MainActivity", "❌ No se encontró el medicamento '$nombreNormalizado' para programar recordatorios")
             Log.e("MainActivity", "Medicamentos disponibles:")
             medicamentos.forEach { med ->
-                Log.e("MainActivity", "- ${med.nombre} (ID: ${med.id})")
+                Log.e("MainActivity", "  - ${med.nombre} (normalizado: ${normalizarNombreMedicamento(med.nombre)}) (ID: ${med.id})")
             }
         }
 
         Log.d("MainActivity", "=== FINALIZANDO programarRecordatorios ===")
     }
+
 
     @OptIn(UnstableApi::class)
     private fun actualizarListaMedicamentos() {

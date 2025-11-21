@@ -54,17 +54,28 @@
         android:theme="@style/Theme.MediCare"
         tools:targetApi="31">
 
-        <!-- MainActivity Principal -->
+        <!-- MainActivity (ya no es LAUNCHER) -->
         <activity
-            android:name="com.example.medicare.MainActivity"
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <!-- ✅ LoginActivity como LAUNCHER -->
+        <activity
+            android:name=".LoginActivity"
             android:exported="true"
-            android:screenOrientation="portrait"
-            android:theme="@style/Theme.MediCare">
+            android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- RegisterActivity -->
+        <activity
+            android:name=".RegisterActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
 
         <!-- Otras Activities -->
         <activity

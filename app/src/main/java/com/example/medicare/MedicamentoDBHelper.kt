@@ -11,7 +11,7 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
 
     companion object {
         private const val DATABASE_NAME = "medicamentos.db"
-        private const val DATABASE_VERSION = 3 // Incrementado para la tabla escalamientos
+        private const val DATABASE_VERSION = 4 // ✅ INCREMENTAR VERSIÓN
 
         // Tabla medicamentos
         private const val TABLE_MEDICAMENTOS = "medicamentos"
@@ -22,6 +22,7 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
         private const val COLUMN_FECHA_CREACION = "fecha_creacion"
         private const val COLUMN_HORA_INICIO = "hora_inicio"
         private const val COLUMN_ACTIVO = "activo"
+        private const val COLUMN_USER_ID = "user_id"
 
         // Tabla recordatorios
         private const val TABLE_RECORDATORIOS = "recordatorios"
@@ -61,7 +62,8 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
                 $COLUMN_HORARIO_HORAS INTEGER NOT NULL,
                 $COLUMN_FECHA_CREACION INTEGER NOT NULL,
                 $COLUMN_HORA_INICIO INTEGER,
-                $COLUMN_ACTIVO INTEGER DEFAULT 1
+                $COLUMN_ACTIVO INTEGER DEFAULT 1,
+                $COLUMN_USER_ID TEXT NOT NULL
             )
         """.trimIndent()
 
@@ -147,23 +149,21 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
             }
         }
 
-        if (oldVersion < 3) {
-            // Crear tabla escalamientos si no existe
-            val createEscalamientosTable = """
-                CREATE TABLE IF NOT EXISTS $TABLE_ESCALAMIENTOS (
-                    $COLUMN_ESC_ID INTEGER PRIMARY KEY AUTOINCREMENT,
-                    $COLUMN_ESC_MEDICAMENTO_ID INTEGER NOT NULL,
-                    $COLUMN_ESC_RECORDATORIO_ID INTEGER NOT NULL,
-                    $COLUMN_ESC_NIVEL INTEGER DEFAULT 1,
-                    $COLUMN_ESC_FECHA_CREACION INTEGER NOT NULL,
-                    $COLUMN_ESC_COMPLETADO INTEGER DEFAULT 0,
-                    FOREIGN KEY($COLUMN_ESC_MEDICAMENTO_ID) REFERENCES $TABLE_MEDICAMENTOS($COLUMN_ID),
-                    FOREIGN KEY($COLUMN_ESC_RECORDATORIO_ID) REFERENCES $TABLE_RECORDATORIOS($COLUMN_REC_ID)
-                )
-            """.trimIndent()
-
-            db?.execSQL(createEscalamientosTable)
+        if (oldVersion < 4) {
+            try {
+                // Intentar agregar columna si no existe
+                db?.execSQL("ALTER TABLE $TABLE_MEDICAMENTOS ADD COLUMN $COLUMN_USER_ID TEXT DEFAULT ''")
+                Log.d("MedicamentosDBHelper", "✅ Columna user_id agregada")
+            } catch (e: Exception) {
+                Log.w("MedicamentosDBHelper", "Columna user_id ya existe o error: ${e.message}")
+            }
         }
+    }
+
+    // ✅ NUEVA FUNCIÓN: Obtener userId actual
+    private fun getCurrentUserId(): String {
+        val authManager = FirebaseAuthManager(context)
+        return authManager.getCurrentUserId() ?: ""
     }
 
     // === MÉTODOS PARA ESCALAMIENTOS ===
@@ -292,13 +292,23 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
     fun insertarMedicamento(medicamento: Medicamento): Long {
         val db = writableDatabase
 
-        // ✅ Normalizar nombre antes de insertar: Primera letra mayúscula, resto minúsculas
+        val userId = context.getSharedPreferences("auth_prefs", Context.MODE_PRIVATE)
+            .getString("user_id", null)
+
+        if (userId == null) {
+            Log.e("DBHelper", "❌ No hay usuario logueado, no se puede insertar")
+            db.close()
+            return -1
+        }
+
+        // ✅ Normalizar nombre antes de insertar
         val nombreNormalizado = medicamento.nombre
             .trim()
             .lowercase()
             .replaceFirstChar { it.uppercase() }
 
         val values = ContentValues().apply {
+            put(COLUMN_USER_ID, userId)
             put(COLUMN_NOMBRE, nombreNormalizado)
             put(COLUMN_CANTIDAD, medicamento.cantidad)
             put(COLUMN_HORARIO_HORAS, medicamento.horarioHoras)
@@ -310,7 +320,7 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
         val id = db.insert(TABLE_MEDICAMENTOS, null, values)
 
         if (id > 0) {
-            Log.d("MedicamentosDBHelper", "✅ Medicamento insertado: $nombreNormalizado (ID: $id)")
+            Log.d("MedicamentosDBHelper", "✅ Medicamento insertado para user $userId: $nombreNormalizado (ID: $id)")
         } else {
             Log.e("MedicamentosDBHelper", "❌ Error insertando medicamento: $nombreNormalizado")
         }
@@ -322,12 +332,19 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
     fun obtenerTodosMedicamentos(): List<Medicamento> {
         val medicamentos = mutableListOf<Medicamento>()
         val db = readableDatabase
+        val userId = getCurrentUserId()
+
+        if (userId.isEmpty()) {
+            Log.w("MedicamentosDBHelper", "⚠️ No hay usuario logueado, retornando lista vacía")
+            db.close()
+            return medicamentos
+        }
 
         val cursor = db.query(
             TABLE_MEDICAMENTOS,
             null,
-            null,
-            null,
+            "$COLUMN_USER_ID = ?",  // ✅ FILTRAR POR USUARIO
+            arrayOf(userId),
             null,
             null,
             "$COLUMN_FECHA_CREACION DESC"
@@ -350,6 +367,8 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
 
         cursor.close()
         db.close()
+
+        Log.d("MedicamentosDBHelper", "✅ ${medicamentos.size} medicamentos obtenidos para user $userId")
         return medicamentos
     }
 
@@ -357,14 +376,23 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
         val db = readableDatabase
         var medicamento: Medicamento? = null
 
+        val userId = context.getSharedPreferences("auth_prefs", Context.MODE_PRIVATE)
+            .getString("user_id", null)
+
+        if (userId == null) {
+            Log.e("DBHelper", "❌ No hay usuario logueado")
+            return null
+        }
+
         // ✅ Usar LOWER() en SQLite para comparación case-insensitive
         val cursor = db.rawQuery(
             """
         SELECT * FROM $TABLE_MEDICAMENTOS 
-        WHERE LOWER(TRIM($COLUMN_NOMBRE)) = LOWER(TRIM(?))
+        WHERE user_id = ? 
+        AND LOWER(TRIM($COLUMN_NOMBRE)) = LOWER(TRIM(?))
         LIMIT 1
         """,
-            arrayOf(nombre)
+            arrayOf(userId, nombre)
         )
 
         if (cursor.moveToFirst()) {
@@ -373,16 +401,19 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
                 nombre = cursor.getString(cursor.getColumnIndexOrThrow(COLUMN_NOMBRE)),
                 cantidad = cursor.getInt(cursor.getColumnIndexOrThrow(COLUMN_CANTIDAD)),
                 horarioHoras = cursor.getInt(cursor.getColumnIndexOrThrow(COLUMN_HORARIO_HORAS)),
-                horaInicio = cursor.getLong(cursor.getColumnIndexOrThrow(COLUMN_HORA_INICIO)),
+                fechaCreacion = cursor.getLong(cursor.getColumnIndexOrThrow(COLUMN_FECHA_CREACION)),
+                horaInicio = if (cursor.isNull(cursor.getColumnIndexOrThrow(COLUMN_HORA_INICIO)))
+                    null else cursor.getLong(cursor.getColumnIndexOrThrow(COLUMN_HORA_INICIO)),
                 activo = cursor.getInt(cursor.getColumnIndexOrThrow(COLUMN_ACTIVO)) == 1
             )
 
             Log.d("DBHelper", "✅ Medicamento encontrado: ${medicamento.nombre} (normalizado de: $nombre)")
         } else {
-            Log.d("DBHelper", "❌ No se encontró medicamento con nombre: $nombre")
+            Log.d("DBHelper", "❌ No se encontró medicamento para user $userId con nombre: $nombre")
         }
 
         cursor.close()
+        db.close()
         return medicamento
     }
 
@@ -437,12 +468,18 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
     fun obtenerMedicamentosConBajoStock(umbral: Int = 3): List<Medicamento> {
         val medicamentosBajoStock = mutableListOf<Medicamento>()
         val db = readableDatabase
+        val userId = getCurrentUserId()
+
+        if (userId.isEmpty()) {
+            db.close()
+            return medicamentosBajoStock
+        }
 
         val cursor = db.query(
             TABLE_MEDICAMENTOS,
             null,
-            "$COLUMN_CANTIDAD <= ? AND $COLUMN_ACTIVO = 1",
-            arrayOf(umbral.toString()),
+            "$COLUMN_CANTIDAD <= ? AND $COLUMN_ACTIVO = 1 AND $COLUMN_USER_ID = ?",
+            arrayOf(umbral.toString(), userId),
             null,
             null,
             null
@@ -466,6 +503,47 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
         cursor.close()
         db.close()
         return medicamentosBajoStock
+    }
+
+    // ✅ NUEVA FUNCIÓN: Limpiar datos del usuario al cerrar sesión
+    fun limpiarDatosUsuario(userId: String) {
+        if (userId.isEmpty()) {
+            Log.w("MedicamentosDBHelper", "⚠️ No se puede limpiar sin userId")
+            return
+        }
+
+        val db = writableDatabase
+
+        try {
+            // Contar antes de borrar
+            val cursor = db.query(
+                TABLE_MEDICAMENTOS,
+                arrayOf("COUNT(*)"),
+                "$COLUMN_USER_ID = ?",
+                arrayOf(userId),
+                null, null, null
+            )
+
+            var count = 0
+            if (cursor.moveToFirst()) {
+                count = cursor.getInt(0)
+            }
+            cursor.close()
+
+            // Borrar medicamentos del usuario
+            val medicamentosEliminados = db.delete(
+                TABLE_MEDICAMENTOS,
+                "$COLUMN_USER_ID = ?",
+                arrayOf(userId)
+            )
+
+            Log.d("MedicamentosDBHelper", "🗑️ $medicamentosEliminados de $count medicamentos eliminados para user $userId")
+
+        } catch (e: Exception) {
+            Log.e("MedicamentosDBHelper", "❌ Error limpiando datos: ${e.message}")
+        } finally {
+            db.close()
+        }
     }
 
     fun activarDesactivarMedicamento(medicamentoId: Long, activo: Boolean): Boolean {
