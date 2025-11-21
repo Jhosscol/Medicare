@@ -73,6 +73,7 @@ dependencies {
     implementation(libs.androidx.media3.common.ktx)
     implementation(libs.androidx.foundation.android)
     implementation(libs.play.services.appindexing)
+    implementation(libs.firebase.crashlytics.buildtools)
 
     // Testing
     testImplementation(libs.junit)
@@ -122,4 +123,5 @@ dependencies {
 
     // FirebaseUI Auth
     implementation("com.firebaseui:firebase-ui-auth:8.0.2")
+    implementation("org.greenrobot:eventbus:3.3.1")
 }

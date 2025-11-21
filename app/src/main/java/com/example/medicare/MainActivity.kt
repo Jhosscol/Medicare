@@ -1908,7 +1908,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         // Cancelar hasta 1000 posibles recordatorios previos (ajusta según necesites)
         for (i in 0 until 1000) {
-            val intent = Intent(this, AlarmReceiver::class.java)
+            val intent = Intent(this, MedicamentoAlarmReceiver::class.java)
             val requestCode = "${nombre.hashCode()}_$i".hashCode()
 
             val pendingIntent = PendingIntent.getBroadcast(

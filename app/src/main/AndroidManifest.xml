@@ -101,19 +101,45 @@
 
         <!-- Receivers -->
         <receiver
-            android:name="com.example.medicare.AlarmReceiver"
+            android:name=".MedicamentoAlarmReceiver"
             android:enabled="true"
-            android:exported="false" />
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Services -->
         <service
-            android:name="com.example.medicare.AlarmService"
+            android:name="com.example.medicare.MedicamentoAlarmService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
         <service
             android:name="com.example.medicare.EscalamientoAlarmService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Servicio de alarmas con integración de emergencia -->
+        <service
+            android:name=".MedicamentoAlarmService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Servicio de monitoreo de emergencia (del AgenteEmergenciaComunicacion) -->
+        <service
+            android:name=".ServicioMonitorMedicamentosActualizado"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            tools:ignore="ForegroundServicePermission" />
+
+        <!-- Servicio de escalamiento -->
+        <service
+            android:name=".EscalamientoAlarmService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />

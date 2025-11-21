@@ -613,14 +613,41 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
 
     fun postergarRecordatorio(recordatorioId: Long, nuevaFechaHora: Long): Boolean {
         val db = writableDatabase
-        val values = ContentValues().apply {
-            put(COLUMN_REC_FECHA_HORA, nuevaFechaHora)
-            put(COLUMN_REC_POSTERGADO, 1)
-        }
+        return try {
+            // Primero obtener el valor actual de postergado
+            val cursor = db.query(
+                TABLE_RECORDATORIOS,
+                arrayOf(COLUMN_REC_POSTERGADO),
+                "$COLUMN_REC_ID = ?",
+                arrayOf(recordatorioId.toString()),
+                null, null, null
+            )
 
-        val rowsUpdated = db.update(TABLE_RECORDATORIOS, values, "$COLUMN_REC_ID = ?", arrayOf(recordatorioId.toString()))
-        db.close()
-        return rowsUpdated > 0
+            var postergadoActual = 0
+            if (cursor.moveToFirst()) {
+                postergadoActual = cursor.getInt(0)
+            }
+            cursor.close()
+
+            // Actualizar con nuevo valor incrementado
+            val values = ContentValues().apply {
+                put(COLUMN_REC_FECHA_HORA, nuevaFechaHora)
+                put(COLUMN_REC_POSTERGADO, postergadoActual + 1)
+            }
+
+            val rowsUpdated = db.update(
+                TABLE_RECORDATORIOS, values,
+                "$COLUMN_REC_ID = ?", arrayOf(recordatorioId.toString())
+            )
+
+            Log.d("MedicamentosDBHelper", "Recordatorio $recordatorioId postergado (count: ${postergadoActual + 1})")
+            rowsUpdated > 0
+        } catch (e: Exception) {
+            Log.e("MedicamentosDBHelper", "Error postergando recordatorio: ${e.message}")
+            false
+        } finally {
+            db.close()
+        }
     }
 
     fun eliminarRecordatoriosPorMedicamento(medicamentoId: Long): Boolean {
@@ -646,6 +673,100 @@ class MedicamentosDBHelper(private val context: Context) : SQLiteOpenHelper(cont
         db.close()
         return id
     }
+
+    // Método para obtener recordatorios que necesitan atención de emergencia
+    fun obtenerRecordatoriosParaEmergencia(): List<RecordatorioEmergencia> {
+        val recordatorios = mutableListOf<RecordatorioEmergencia>()
+        val db = readableDatabase
+        val userId = getCurrentUserId()
+
+        if (userId.isEmpty()) {
+            db.close()
+            return recordatorios
+        }
+
+        try {
+            val query = """
+            SELECT r.$COLUMN_REC_ID, r.$COLUMN_REC_MEDICAMENTO_ID, 
+                   m.$COLUMN_NOMBRE, r.$COLUMN_REC_FECHA_HORA,
+                   r.$COLUMN_REC_POSTERGADO
+            FROM $TABLE_RECORDATORIOS r
+            JOIN $TABLE_MEDICAMENTOS m ON r.$COLUMN_REC_MEDICAMENTO_ID = m.$COLUMN_ID
+            WHERE r.$COLUMN_REC_COMPLETADO = 0 
+            AND m.$COLUMN_ACTIVO = 1
+            AND m.$COLUMN_USER_ID = ?
+            AND r.$COLUMN_REC_FECHA_HORA < ?
+            ORDER BY r.$COLUMN_REC_FECHA_HORA ASC
+        """.trimIndent()
+
+            val tiempoLimite = System.currentTimeMillis() - (20 * 60 * 1000) // 20 minutos atrás
+
+            val cursor = db.rawQuery(query, arrayOf(userId, tiempoLimite.toString()))
+
+            while (cursor.moveToNext()) {
+                val recordatorio = RecordatorioEmergencia(
+                    id = cursor.getLong(cursor.getColumnIndexOrThrow(COLUMN_REC_ID)),
+                    medicamentoId = cursor.getLong(cursor.getColumnIndexOrThrow(COLUMN_REC_MEDICAMENTO_ID)),
+                    nombreMedicamento = cursor.getString(cursor.getColumnIndexOrThrow(COLUMN_NOMBRE)),
+                    fechaOriginal = cursor.getLong(cursor.getColumnIndexOrThrow(COLUMN_REC_FECHA_HORA)),
+                    numeroPostergaciones = cursor.getInt(cursor.getColumnIndexOrThrow(COLUMN_REC_POSTERGADO)),
+                    notificacionEnviada = false // Por ahora siempre false, puedes agregar columna
+                )
+                recordatorios.add(recordatorio)
+            }
+            cursor.close()
+
+        } catch (e: Exception) {
+            Log.e("MedicamentosDBHelper", "Error obteniendo recordatorios emergencia: ${e.message}")
+        } finally {
+            db.close()
+        }
+
+        return recordatorios
+    }
+
+    // Método para marcar que se envió notificación de emergencia
+    fun marcarNotificacionEnviada(recordatorioId: Long): Boolean {
+        // Por ahora solo incrementamos el contador de postergaciones
+        // Puedes agregar una columna específica si lo necesitas
+        val db = writableDatabase
+        return try {
+            val cursor = db.query(
+                TABLE_RECORDATORIOS,
+                arrayOf(COLUMN_REC_POSTERGADO),
+                "$COLUMN_REC_ID = ?",
+                arrayOf(recordatorioId.toString()),
+                null, null, null
+            )
+
+            var postergadoActual = 0
+            if (cursor.moveToFirst()) {
+                postergadoActual = cursor.getInt(0)
+            }
+            cursor.close()
+
+            val values = ContentValues().apply {
+                put(COLUMN_REC_POSTERGADO, postergadoActual + 1)
+            }
+
+            val rowsUpdated = db.update(
+                TABLE_RECORDATORIOS,
+                values,
+                "$COLUMN_REC_ID = ?",
+                arrayOf(recordatorioId.toString())
+            )
+
+            Log.d("MedicamentosDBHelper", "Notificación marcada para recordatorio $recordatorioId")
+            rowsUpdated > 0
+        } catch (e: Exception) {
+            Log.e("MedicamentosDBHelper", "Error marcando notificación: ${e.message}")
+            false
+        } finally {
+            db.close()
+        }
+    }
+
+
 
     fun obtenerHistorialMedicamento(medicamentoId: Long): List<HistorialTomaData> {
         val historial = mutableListOf<HistorialTomaData>()
@@ -701,5 +822,14 @@ data class HistorialTomaData(
     val fechaHoraTomada: Long?,
     val estado: String, // "tomado", "no_tomado", "postergado"
     val cantidadTomada: Int
+)
+// Data class para recordatorios de emergencia
+data class RecordatorioEmergencia(
+    val id: Long,
+    val medicamentoId: Long,
+    val nombreMedicamento: String,
+    val fechaOriginal: Long,
+    val numeroPostergaciones: Int,
+    val notificacionEnviada: Boolean
 )
 
